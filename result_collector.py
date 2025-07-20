@@ -21,7 +21,7 @@ iteration = 0
 interval = 2500 # We run the inference on these many examples at a time to achieve parallelization
 start = iteration * interval
 end = start + interval
-dataset_name =  "place_of_birth" # "trivia_qa" #"capitals"
+dataset_name =  "trivia_qa"  #"place_of_birth" # "trivia_qa" #"capitals"
 trex_data_to_question_template = {
     "capitals": Template("What is the capital of $source?"),
     "place_of_birth": Template("Where was $source born?"),
@@ -281,6 +281,7 @@ def compute_and_save_results():
         results['first_attention'].append(first_attention)
         results['final_attention'].append(final_attention)
         results['attributes_first'].append(attributes_first)
+    results_dir.mkdir(parents=True, exist_ok=True)
     with open(results_dir/f"{model_name}_{dataset_name}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle", "wb") as outfile:
         outfile.write(pickle.dumps(results))
 
