@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, LlamaForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, LlamaTokenizer, LlamaForCausalLM, BitsAndBytesConfig
 from tqdm import tqdm
 from datasets import load_dataset
 from collections import defaultdict, Counter
@@ -16,7 +16,12 @@ from captum.attr import IntegratedGradients
 from string import Template
 import os
 from typing import Union, Any
+from eval_datasets_nqswap import NQSwap
+from accelerate import PartialState, Accelerator
 
+
+# Initialize accelerator
+accelerator = Accelerator()
 
 HF_DEFAULT_HOME = os.environ.get("HF_HOME", "~/.cache/huggingface/hub")
 
@@ -25,7 +30,7 @@ iteration = 0
 interval = 21000 # We run the inference on these many examples at a time to achieve parallelization
 start = iteration * interval
 end = start + interval
-dataset_name =  "trivia_qa"  #"place_of_birth" # "trivia_qa" #"capitals"
+dataset_name =  "nqswap"  #"place_of_birth" # "trivia_qa" #"capitals"
 trex_data_to_question_template = {
     "capitals": Template("What is the capital of $source?"),
     "place_of_birth": Template("Where was $source born?"),
@@ -131,23 +136,14 @@ def get_weight_dir(
     return weight_dir
 
 
-def load_data(dataset_name):
-    if dataset_name in trex_data_to_question_template.keys():
-        pd_frame = pd.read_csv(data_dir / f'{dataset_name}.csv')
-        dataset = [(pd_frame.iloc[i]['subject'], pd_frame.iloc[i]['object'].split("<OR>")) for i in range(start, min(end, len(pd_frame)))]
-    elif dataset_name=="trivia_qa":
-        local_model_path = get_weight_dir("mandarjoshi/trivia_qa", repo_type="datasets", subset="rc.nocontext")
-        trivia_qa = load_dataset("parquet", data_dir=local_model_path)
-
-        full_dataset = []
-        for obs in tqdm(trivia_qa['train']):
-            aliases = []
-            aliases.extend(obs['answer']['aliases'])
-            aliases.extend(obs['answer']['normalized_aliases'])
-            aliases.append(obs['answer']['value'])
-            aliases.append(obs['answer']['normalized_value'])
-            full_dataset.append((obs['question'], aliases))
-        dataset = full_dataset[start: end]
+def load_data(dataset_name, tokenizer, none_conflict=False, use_local=False):
+    seed = 42
+    demonstrations_org_context = True
+    demonstrations_org_answer = True
+    
+    if dataset_name == "nqswap":
+        dataset = NQSwap(4, seed, tokenizer, demonstrations_org_context,
+                         demonstrations_org_answer, -1, none_conflict, use_local=use_local)
     else:
         raise ValueError(f"Unknown dataset {dataset_name}.")
     return dataset
@@ -159,33 +155,25 @@ def get_next_token(x, model):
 
 
 def generate_response(x, model, *, max_length=100, pbar=False):
-    response = []
     bar = tqdm(range(max_length)) if pbar else range(max_length)
     for step in bar:
         logits = get_next_token(x, model)
         next_token = logits.squeeze()[-1].argmax()
         x = torch.concat([x, next_token.view(1, -1)], dim=1)
-        response.append(next_token)
         if next_token == get_stop_token() and step>5:
             break
-    return torch.stack(response).cpu().numpy(), logits.squeeze()
+    return logits.squeeze()
 
 
-def answer_question(question, model, tokenizer, *, max_length=100, pbar=False):
-    input_ids = tokenizer(question, return_tensors='pt').input_ids.to(model.device)
-    response, logits = generate_response(input_ids, model, max_length=max_length, pbar=pbar)
-    return response, logits, input_ids.shape[-1]
+def answer_question(input_ids, model, *, max_length=100, pbar=False):
+    input_ids = input_ids.to(model.device)
+    logits = generate_response(input_ids, model, max_length=max_length, pbar=pbar)
+    return logits, input_ids.shape[-1]
 
 
-def answer_trivia(question, targets, model, tokenizer):
-    response, logits, start_pos = answer_question(question, model, tokenizer)
-    str_response = tokenizer.decode(response, skip_special_tokens=True)
-    correct = False
-    for alias in targets:
-        if alias.lower() in str_response.lower():
-            correct = True
-            break
-    return response, str_response, logits, start_pos, correct
+def answer_trivia(input_ids, model):
+    logits, start_pos = answer_question(input_ids, model)
+    return logits, start_pos
 
 
 def answer_trex(source, targets, model, tokenizer, question_template):
@@ -252,8 +240,8 @@ def get_embedder(model):
     else:
         raise ValueError(f"Unknown model {model_name}")
 
-def get_ig(prompt, forward_func, tokenizer, embedder, model):
-    input_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(model.device)
+def get_ig(input_ids, forward_func, embedder, model):
+    input_ids = input_ids.to(model.device)
     prediction_id = get_next_token(input_ids, model).squeeze()[-1].argmax()
     encoder_input_embeds = embedder(input_ids).detach() # fix this for each model
     ig = IntegratedGradients(forward_func=forward_func)
@@ -268,37 +256,59 @@ def get_ig(prompt, forward_func, tokenizer, embedder, model):
     return attributes
 
 
-def compute_and_save_results():
-
-    # Dataset
-    dataset = load_data(dataset_name)
-    if dataset_name in trex_data_to_question_template.keys():
-        question_asker = functools.partial(answer_trex, question_template=trex_data_to_question_template[dataset_name])
-    elif dataset_name == "trivia_qa":
-        question_asker = answer_trivia
-    else:
-        raise ValueError(f"Unknown dataset name {dataset_name}.")
+def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, only_fully=True):
+    
+    print("=="*50)
+    print(f"Computing results for {model_name} on {dataset_name} dataset \nNone conflict: {none_conflict}, Use local: {use_local}")
+    print(f"\n Only fully connected: {only_fully}, Not IG: {not_ig}")
+    print("=="*50)
+    
+    batch_size = 1
 
     # Model
-    model_loader = LlamaForCausalLM if "llama" in model_name.lower() else AutoModelForCausalLM
-    token_loader = AutoTokenizer
+    print(f"Loading model {model_name} from {model_repos[model_name][0]}/{model_name}")
+    model_loader = LlamaForCausalLM if "llama" in model_name else AutoModelForCausalLM
+    token_loader = LlamaTokenizer if "llama" in model_name else AutoTokenizer
+    device_string = PartialState().process_index
+    n_gpus = torch.cuda.device_count()
+    max_memory = {i: "10000MB" for i in range(n_gpus)}
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
-    model_local_path = get_weight_dir(f'{model_repos[model_name][0]}/{model_name}')
-    tokenizer = token_loader.from_pretrained(model_local_path, local_files_only=True, token=True)
-    model = model_loader.from_pretrained(model_local_path, local_files_only=True,
-                                         cache_dir=model_dir,
-                                         device_map=device,
-                                         quantization_config=bnb_config,
-                                         torch_dtype=torch.bfloat16)
+
+    if not use_local:
+        tokenizer = token_loader.from_pretrained(f'{model_repos[model_name][0]}/{model_name}')
+        model = model_loader.from_pretrained(f'{model_repos[model_name][0]}/{model_name}',
+                                            cache_dir=model_dir,
+                                            device_map={'':device_string},
+                                            max_memory=max_memory,
+                                            quantization_config=bnb_config,
+                                            torch_dtype=torch.bfloat16,
+                                            trust_remote_code=True)
+    else:
+        model_local_path = get_weight_dir(f'{model_repos[model_name][0]}/{model_name}')
+        tokenizer = token_loader.from_pretrained(model_local_path, local_files_only=True, token=True)
+        model = model_loader.from_pretrained(model_local_path, local_files_only=True,
+                                            cache_dir=model_dir,
+                                            max_memory=max_memory,
+                                            quantization_config=bnb_config,
+                                            device_map={'':device_string},
+                                            torch_dtype=torch.bfloat16)
+    
+    tokenizer.pad_token = tokenizer.eos_token
     forward_func = partial(model_forward, model=model, extra_forward_args={})
     embedder = get_embedder(model)
 
+    # Dataset
+    print(f"Loading dataset {dataset_name}")
+    dataset = load_data(dataset_name, tokenizer=tokenizer, none_conflict=none_conflict, use_local=use_local)
+    question_asker = answer_trivia
+
     # Prepare to save the internal states
+    print("Preparing to save internal states")
     for name, module in model.named_modules():
         if re.match(f'{model_repos[model_name][1]}$', name):
             fully_connected_forward_handles[name] = module.register_forward_hook(
@@ -306,35 +316,63 @@ def compute_and_save_results():
         if re.match(f'{model_repos[model_name][2]}$', name):
             attention_forward_handles[name] = module.register_forward_hook(partial(save_attention_hidden, name))
 
-    # Generate results
+    # Save activations
+    print("Starting to save activations\n")
+
+    # Prepare with accelerator
+    model, dataset = accelerator.prepare(model, dataset)
+
+    input_ids_key = "with_ctx_input_ids"
+    dataloader = dataset.get_dataloader(batch_size)
+    num_examples = 0
+    tqdm_bar = tqdm(enumerate(dataloader), total=len(dataloader), disable=False)
     results = defaultdict(list)
-    for idx in tqdm(range(len(dataset))):
+
+    for bid, batch in tqdm_bar:
+        tqdm_bar.set_description(f"analysis {bid}, num_examples: {num_examples}")
+        num_examples += 1
+
         fully_connected_hidden_layers.clear()
         attention_hidden_layers.clear()
-
-        question, answers = dataset[idx]
-        response, str_response, logits, start_pos, correct = question_asker(question, answers, model, tokenizer)
+        
+        logits, start_pos = question_asker(batch[input_ids_key], model)
         layer_start, layer_end = get_start_end_layer(model)
-        first_fully_connected, final_fully_connected = collect_fully_connected(start_pos, layer_start, layer_end)
-        first_attention, final_attention = collect_attention(start_pos, layer_start, layer_end)
-        attributes_first = get_ig(question, forward_func, tokenizer, embedder, model)
+        
+        if only_fully:
+            first_fully_connected, final_fully_connected = collect_fully_connected(start_pos, layer_start, layer_end)
+        else:
+            first_attention, final_attention = collect_attention(start_pos, layer_start, layer_end)
+        
+        if not not_ig:
+            attributes_first = get_ig(batch[input_ids_key], forward_func, embedder, model)
 
-        results['question'].append(question)
-        results['answers'].append(answers)
-        results['response'].append(response)
-        results['str_response'].append(str_response)
-        results['logits'].append(logits.to(torch.float32).cpu().numpy())
+        results['logits'].append(logits.detach().cpu())
         results['start_pos'].append(start_pos)
-        results['correct'].append(correct)
-        results['first_fully_connected'].append(first_fully_connected)
-        results['final_fully_connected'].append(final_fully_connected)
-        results['first_attention'].append(first_attention)
-        results['final_attention'].append(final_attention)
-        results['attributes_first'].append(attributes_first)
+        results['none_conflict'].append(none_conflict)
+
+        if only_fully:
+            results['first_fully_connected'].append(first_fully_connected.detach().cpu())
+            results['final_fully_connected'].append(final_fully_connected.detach().cpu())
+        else:
+            results['first_attention'].append(first_attention.detach().cpu())
+            results['final_attention'].append(final_attention.detach().cpu())
+
+        if not not_ig:
+            results['attributes_first'].append(attributes_first.detach().cpu())
+
+
+    print(f"Finished processing {num_examples} examples.\nSaving results...")
     results_dir.mkdir(parents=True, exist_ok=True)
+    
     with open(results_dir/f"{model_name}_{dataset_name}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle", "wb") as outfile:
         outfile.write(pickle.dumps(results))
 
+    batch[input_ids_key] = []
+    
+    print("=="*50)
+
 
 if __name__ == '__main__':
-    compute_and_save_results()
+    compute_and_save_results(none_conflict=False, only_fully=True)
+
+    compute_and_save_results(none_conflict=True, only_fully=True)
