@@ -51,14 +51,14 @@ ig_steps = 64
 internal_batch_size = 4
 
 # Model
-model_name = "falcon-7b" #"opt-30b"
+model_name = "Meta-Llama-3-8B" #"opt-30b"
 layer_number = -1
 # hardcode below,for now. Could dig into all models but they take a while to load
 model_num_layers = {
     "falcon-40b" : 60,
     "falcon-7b" : 32,
     "open_llama_13b" : 40,
-    "open_llama_7b" : 32,
+    "Meta-Llama-3-8B" : 32,
     "opt-6.7b" : 32,
     "opt-30b" : 48,
 }
@@ -68,7 +68,7 @@ model_repos = {
     "falcon-40b" : ("tiiuae", f".*transformer.h.{coll_str}.mlp.dense_4h_to_h", f".*transformer.h.{coll_str}.self_attention.dense"),
     "falcon-7b" : ("tiiuae", f".*transformer.h.{coll_str}.mlp.dense_4h_to_h", f".*transformer.h.{coll_str}.self_attention.dense"),
     "open_llama_13b" : ("openlm-research", f".*model.layers.{coll_str}.mlp.up_proj", f".*model.layers.{coll_str}.self_attn.o_proj"),
-    "open_llama_7b" : ("openlm-research", f".*model.layers.{coll_str}.mlp.up_proj", f".*model.layers.{coll_str}.self_attn.o_proj"),
+    "Meta-Llama-3-8B" : ("meta-llama", f".*model.layers.{coll_str}.mlp.up_proj", f".*model.layers.{coll_str}.self_attn.o_proj"),
     "opt-6.7b" : ("facebook", f".*model.decoder.layers.{coll_str}.fc2", f".*model.decoder.layers.{coll_str}.self_attn.out_proj"),
     "opt-30b" : ("facebook", f".*model.decoder.layers.{coll_str}.fc2", f".*model.decoder.layers.{coll_str}.self_attn.out_proj", ),
 }
@@ -351,15 +351,32 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
         results['none_conflict'].append(none_conflict)
 
         if only_fully:
-            results['first_fully_connected'].append(first_fully_connected.detach().cpu())
-            results['final_fully_connected'].append(final_fully_connected.detach().cpu())
+            if isinstance(first_fully_connected, torch.Tensor):
+                results['first_fully_connected'].append(first_fully_connected.detach().cpu())
+                results['final_fully_connected'].append(final_fully_connected.detach().cpu())
+            elif isinstance(first_fully_connected, np.ndarray):
+                results['first_fully_connected'].append(first_fully_connected)
+                results['final_fully_connected'].append(final_fully_connected)
+            else:
+                raise TypeError(f"Unsupported type for first_fully_connected: {type(first_fully_connected)}")
+            
         else:
-            results['first_attention'].append(first_attention.detach().cpu())
-            results['final_attention'].append(final_attention.detach().cpu())
-
+            if isinstance(first_attention, torch.Tensor):
+                results['first_attention'].append(first_attention.detach().cpu())
+                results['final_attention'].append(final_attention.detach().cpu())
+            elif isinstance(first_attention, np.ndarray):
+                results['first_attention'].append(first_attention)
+                results['final_attention'].append(final_attention)
+            else:
+                raise TypeError(f"Unsupported type for first_attention: {type(first_attention)}")
+            
         if not not_ig:
-            results['attributes_first'].append(attributes_first.detach().cpu())
-
+            if isinstance(attributes_first, torch.Tensor):
+                results['attributes_first'].append(attributes_first.detach().cpu())
+            elif isinstance(attributes_first, np.ndarray):
+                results['attributes_first'].append(attributes_first)
+            else:
+                raise TypeError(f"Unsupported type for attributes_first: {type(attributes_first)}")
 
     print(f"Finished processing {num_examples} examples.\nSaving results...")
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -373,6 +390,6 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
 
 
 if __name__ == '__main__':
-    compute_and_save_results(none_conflict=False, only_fully=True)
+    compute_and_save_results(none_conflict=False, only_fully=True, use_local=False)
 
-    compute_and_save_results(none_conflict=True, only_fully=True)
+    compute_and_save_results(none_conflict=True, only_fully=True, use_local=False)

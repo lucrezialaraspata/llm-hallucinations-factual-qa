@@ -20,5 +20,5 @@
 
 source .venv/bin/activate
 
-srun -u python -W ignore -m result_collector_kc
+srun -u python -m result_collector_kc
 #srun -u accelerate launch --multi_gpu -m result_collector_kc
