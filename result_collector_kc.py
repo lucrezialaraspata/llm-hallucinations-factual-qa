@@ -12,7 +12,7 @@ from datasets import load_dataset
 from collections import defaultdict, Counter
 from functools import partial
 import re
-from captum.attr import IntegratedGradients
+#from captum.attr import IntegratedGradients
 from string import Template
 import os
 from typing import Union, Any
@@ -40,7 +40,7 @@ trex_data_to_question_template = {
 # IO
 data_dir = Path(".") # Where our data files are stored
 model_dir = Path("./.cache/models/") # Cache for huggingface models
-results_dir = Path("./results/") # Directory for storing results
+results_dir = Path("./results/kc") # Directory for storing results
 
 # Hardware
 gpu = "0"
@@ -51,7 +51,7 @@ ig_steps = 64
 internal_batch_size = 4
 
 # Model
-model_name = "Meta-Llama-3-8B" #"opt-30b"
+model_name = "falcon-7b"#"Meta-Llama-3-8B" #"opt-30b"
 layer_number = -1
 # hardcode below,for now. Could dig into all models but they take a while to load
 model_num_layers = {
@@ -79,11 +79,12 @@ attention_hidden_layers = defaultdict(list)
 attention_forward_handles = {}
 fully_connected_forward_handles = {}
 
-
+@torch.no_grad()
 def save_fully_connected_hidden(layer_name, mod, inp, out):
     fully_connected_hidden_layers[layer_name].append(out.squeeze().detach().to(torch.float32).cpu().numpy())
 
 
+@torch.no_grad()
 def save_attention_hidden(layer_name, mod, inp, out):
     attention_hidden_layers[layer_name].append(out.squeeze().detach().to(torch.float32).cpu().numpy())
 
@@ -135,14 +136,15 @@ def get_weight_dir(
     
     return weight_dir
 
-
+@torch.no_grad()
 def load_data(dataset_name, tokenizer, none_conflict=False, use_local=False):
     seed = 42
     demonstrations_org_context = True
     demonstrations_org_answer = True
     
     if dataset_name == "nqswap":
-        dataset = NQSwap(4, seed, tokenizer, demonstrations_org_context,
+        # Reduced the number of demonstrations to 0 for shorter prompts
+        dataset = NQSwap(0, seed, tokenizer, demonstrations_org_context,
                          demonstrations_org_answer, -1, none_conflict, use_local=use_local)
     else:
         raise ValueError(f"Unknown dataset {dataset_name}.")
@@ -170,9 +172,19 @@ def answer_question(input_ids, model, *, max_length=100, pbar=False):
     logits = generate_response(input_ids, model, max_length=max_length, pbar=pbar)
     return logits, input_ids.shape[-1]
 
-
+@torch.no_grad()
 def answer_trivia(input_ids, model):
+    # Truncate very long sequences to prevent OOM
+    max_length = 2048  # Adjust based on your GPU memory
+    print(f"Input IDs shape before truncation: {input_ids.shape} - {input_ids.shape[-1]}")
+    if input_ids.shape[-1] > max_length:
+        input_ids = input_ids[:, -max_length:]
+        print(f"Input IDs shape after truncation: {input_ids.shape} - {input_ids.shape[-1]}")
+    
     logits, start_pos = answer_question(input_ids, model)
+    # Clear cache after inference to free memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return logits, start_pos
 
 
@@ -182,7 +194,7 @@ def answer_trex(source, targets, model, tokenizer, question_template):
     correct = any([target.lower() in str_response.lower() for target in targets])
     return response, str_response, logits, start_pos, correct
 
-
+@torch.no_grad()
 def get_start_end_layer(model):
     if "llama" in model_name.lower():
         layer_count = model.model.layers
@@ -194,7 +206,7 @@ def get_start_end_layer(model):
     layer_en = len(layer_count) if layer_number == -1 else layer_number + 1
     return layer_st, layer_en
 
-
+@torch.no_grad()
 def collect_fully_connected(token_pos, layer_start, layer_end):
     layer_name = model_repos[model_name][1][2:].split(coll_str)
     first_activation = np.stack([fully_connected_hidden_layers[f'{layer_name[0]}{i}{layer_name[1]}'][-1][token_pos] \
@@ -203,7 +215,7 @@ def collect_fully_connected(token_pos, layer_start, layer_end):
                                 for i in range(layer_start, layer_end)])
     return first_activation, final_activation
 
-
+@torch.no_grad()
 def collect_attention(token_pos, layer_start, layer_end):
     layer_name = model_repos[model_name][2][2:].split(coll_str)
     first_activation = np.stack([attention_hidden_layers[f'{layer_name[0]}{i}{layer_name[1]}'][-1][token_pos] \
@@ -229,7 +241,7 @@ def model_forward(input_: torch.Tensor, model, extra_forward_args: Dict[str, Any
         output = model(inputs_embeds=input_, **extra_forward_args)
         return torch.nn.functional.softmax(output.logits[:, -1, :], dim=-1)
 
-
+@torch.no_grad()
 def get_embedder(model):
     if "falcon" in model_name:
         return model.transformer.word_embeddings
@@ -240,22 +252,24 @@ def get_embedder(model):
     else:
         raise ValueError(f"Unknown model {model_name}")
 
+
+@torch.no_grad()
 def get_ig(input_ids, forward_func, embedder, model):
     input_ids = input_ids.to(model.device)
     prediction_id = get_next_token(input_ids, model).squeeze()[-1].argmax()
     encoder_input_embeds = embedder(input_ids).detach() # fix this for each model
-    ig = IntegratedGradients(forward_func=forward_func)
-    attributes = normalize_attributes(
-        ig.attribute(
-            encoder_input_embeds,
-            target=prediction_id,
-            n_steps=ig_steps,
-            internal_batch_size=internal_batch_size
-        )
-    ).detach().cpu().numpy()
-    return attributes
+    #ig = IntegratedGradients(forward_func=forward_func)
+    #attributes = normalize_attributes(
+    #    ig.attribute(
+    #        encoder_input_embeds,
+    #        target=prediction_id,
+    #        n_steps=ig_steps,
+    #        internal_batch_size=internal_batch_size
+    #    )
+    #).detach().cpu().numpy()
+    #return attributes
 
-
+@torch.no_grad()
 def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, only_fully=True):
     
     print("=="*50)
@@ -271,7 +285,8 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
     token_loader = LlamaTokenizer if "llama" in model_name else AutoTokenizer
     device_string = PartialState().process_index
     n_gpus = torch.cuda.device_count()
-    max_memory = {i: "10000MB" for i in range(n_gpus)}
+    # Further increase memory limit for longer sequences
+    max_memory = {i: "12000MB" for i in range(n_gpus)}
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -283,7 +298,7 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
         tokenizer = token_loader.from_pretrained(f'{model_repos[model_name][0]}/{model_name}')
         model = model_loader.from_pretrained(f'{model_repos[model_name][0]}/{model_name}',
                                             cache_dir=model_dir,
-                                            device_map={'':device_string},
+                                            device_map="auto",#{'':device_string},
                                             max_memory=max_memory,
                                             quantization_config=bnb_config,
                                             torch_dtype=torch.bfloat16,
@@ -295,7 +310,7 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
                                             cache_dir=model_dir,
                                             max_memory=max_memory,
                                             quantization_config=bnb_config,
-                                            device_map={'':device_string},
+                                            device_map="auto",#{'':device_string},
                                             torch_dtype=torch.bfloat16)
     
     tokenizer.pad_token = tokenizer.eos_token
@@ -327,13 +342,20 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
     num_examples = 0
     tqdm_bar = tqdm(enumerate(dataloader), total=len(dataloader), disable=False)
     results = defaultdict(list)
+    
+    # Memory management settings
+    save_interval = 20  # Save every 20 examples
+    batch_counter = 0
 
     for bid, batch in tqdm_bar:
         tqdm_bar.set_description(f"analysis {bid}, num_examples: {num_examples}")
         num_examples += 1
 
+        # Clear previous activations and GPU cache
         fully_connected_hidden_layers.clear()
         attention_hidden_layers.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         logits, start_pos = question_asker(batch[input_ids_key], model)
         layer_start, layer_end = get_start_end_layer(model)
@@ -378,11 +400,44 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
             else:
                 raise TypeError(f"Unsupported type for attributes_first: {type(attributes_first)}")
 
-    print(f"Finished processing {num_examples} examples.\nSaving results...")
-    results_dir.mkdir(parents=True, exist_ok=True)
+        # Check if we need to save results and clear memory
+        if num_examples % save_interval == 0:
+            batch_counter += 1
+            print(f"\nSaving intermediate results for batch {batch_counter} (examples {num_examples-save_interval+1}-{num_examples})...")
+            
+            # Save intermediate results
+            results_dir.mkdir(parents=True, exist_ok=True)
+            intermediate_filename = f"{model_name}_{dataset_name}_batch{batch_counter}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle"
+            
+            with open(results_dir / intermediate_filename, "wb") as outfile:
+                outfile.write(pickle.dumps(results))
+            
+            print(f"Intermediate results saved to {intermediate_filename}")
+            
+            # Clear results to free memory
+            results.clear()
+            results = defaultdict(list)
+            
+            # Force garbage collection and clear GPU cache
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            print("Memory cleared for next batch\n")
+
+    # Save any remaining results that weren't saved in the periodic saves
+    if len(results['logits']) > 0:
+        batch_counter += 1
+        print(f"Saving final batch {batch_counter} with remaining {len(results['logits'])} examples...")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
+        final_filename = f"{model_name}_{dataset_name}_batch{batch_counter}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle"
+        with open(results_dir / final_filename, "wb") as outfile:
+            outfile.write(pickle.dumps(results))
+        print(f"Final results saved to {final_filename}")
     
-    with open(results_dir/f"{model_name}_{dataset_name}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle", "wb") as outfile:
-        outfile.write(pickle.dumps(results))
+    print(f"Finished processing {num_examples} examples across {batch_counter} batches.")
 
     batch[input_ids_key] = []
     
@@ -390,6 +445,6 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
 
 
 if __name__ == '__main__':
-    compute_and_save_results(none_conflict=False, only_fully=True, use_local=False)
+    compute_and_save_results(none_conflict=False, only_fully=True)
 
-    compute_and_save_results(none_conflict=True, only_fully=True, use_local=False)
+    compute_and_save_results(none_conflict=True, only_fully=True)
