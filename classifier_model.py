@@ -69,10 +69,11 @@ def gen_classifier_roc(inputs, correct):
     with torch.no_grad():
         pred = torch.nn.functional.softmax(classifier_model(X_test), dim=1)
         prediction_classes = (pred[:,1]>0.5).type(torch.long).cpu()
-        return roc_auc_score(y_test.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==y_test.cpu().numpy()).mean()
+        return roc_auc_score(y_test.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==y_test.cpu().numpy()).mean(), classifier_model
     
 
 def main():
+    print("---------- Classifier Model Training ---------")
     all_results = {}
 
     for idx, results_file in enumerate(tqdm(inference_results)):
@@ -88,44 +89,51 @@ def main():
                 correct = np.array(results['correct'])
         
                 # attributes
-                X_train, X_test, y_train, y_test = train_test_split(results['attributes_first'], correct.astype(int), test_size = 0.2, random_state=1234)
-                rnn_model = RNNHallucinationClassifier()
-                optimizer = torch.optim.AdamW(rnn_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-                for step in range(1001):
-                    x_sub, y_sub = zip(*random.sample(list(zip(X_train, y_train)), batch_size))
-                    y_sub = torch.tensor(y_sub).to(torch.long)
-                    optimizer.zero_grad()
-                    preds = torch.stack([rnn_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in x_sub])
-                    loss = torch.nn.functional.cross_entropy(preds, y_sub)
-                    loss.backward()
-                    optimizer.step()
-                preds = torch.stack([rnn_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in X_test])
-                preds = torch.nn.functional.softmax(preds, dim=1)
-                prediction_classes = (preds[:,1]>0.5).type(torch.long).cpu()
-                classifier_results['attribution_rnn_roc'] = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
-                classifier_results['attribution_rnn_acc'] = (prediction_classes.numpy()==y_test).mean()
-
+                # DONE! X_train, X_test, y_train, y_test = train_test_split(results['attributes_first'], correct.astype(int), test_size = 0.2, random_state=1234)
+                # DONE! rnn_model = RNNHallucinationClassifier()
+                # DONE! optimizer = torch.optim.AdamW(rnn_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+                # DONE! for step in range(1001):
+                # DONE!     x_sub, y_sub = zip(*random.sample(list(zip(X_train, y_train)), batch_size))
+                # DONE!     y_sub = torch.tensor(y_sub).to(torch.long)
+                # DONE!     optimizer.zero_grad()
+                # DONE!     preds = torch.stack([rnn_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in x_sub])
+                # DONE!     loss = torch.nn.functional.cross_entropy(preds, y_sub)
+                # DONE!     loss.backward()
+                # DONE!     optimizer.step()
+                # DONE! preds = torch.stack([rnn_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in X_test])
+                # DONE! preds = torch.nn.functional.softmax(preds, dim=1)
+                # DONE! prediction_classes = (preds[:,1]>0.5).type(torch.long).cpu()
+                # DONE! classifier_results['attribution_rnn_roc'] = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
+                # DONE! classifier_results['attribution_rnn_acc'] = (prediction_classes.numpy()==y_test).mean()
+                # DONE! torch.save(rnn_model.state_dict(), f"model/rnn_hallucination_detection_attribution.pt")
                 # logits
+                print("Processing logits...")
                 first_logits = np.stack([sp.special.softmax(i[j]) for i,j in zip(results['logits'], results['start_pos'])])
-                first_logits_roc, first_logits_acc = gen_classifier_roc(first_logits, correct)
+                first_logits_roc, first_logits_acc, logits_model = gen_classifier_roc(first_logits, correct)
+                torch.save(logits_model.state_dict(), f"model/ffn_hallucination_detection_logits.pt")
+
                 classifier_results['first_logits_roc'] = first_logits_roc
                 classifier_results['first_logits_acc'] = first_logits_acc
 
                 # fully connected
+                print("Processing fully connected layers...")
                 for layer in range(results['first_fully_connected'][0].shape[0]):
-                    layer_roc, layer_acc = gen_classifier_roc(np.stack([i[layer] for i in results['first_fully_connected']]), correct)
+                    layer_roc, layer_acc, fully_model = gen_classifier_roc(np.stack([i[layer] for i in results['first_fully_connected']]), correct)
+                    torch.save(fully_model.state_dict(), f"model/ffn_hallucination_detection_fully_layer{layer}.pt")
+
                     classifier_results[f'first_fully_connected_roc_{layer}'] = layer_roc
                     classifier_results[f'first_fully_connected_acc_{layer}'] = layer_acc
 
                 # attention
+                print("Processing attention layers...")
                 for layer in range(results['first_attention'][0].shape[0]):
-                    layer_roc, layer_acc = gen_classifier_roc(np.stack([i[layer] for i in results['first_attention']]), correct)
+                    layer_roc, layer_acc, attn_model = gen_classifier_roc(np.stack([i[layer] for i in results['first_attention']]), correct)
+                    torch.save(attn_model.state_dict(), f"model/ffn_hallucination_detection_attn_layer{layer}.pt")
+
                     classifier_results[f'first_attention_roc_{layer}'] = layer_roc
                     classifier_results[f'first_attention_acc_{layer}'] = layer_acc
                 
                 all_results[results_file] = classifier_results.copy()
-
-                torch.save(rnn_model.state_dict(), f"model/rnn_hallucination_detection.pt")
             except Exception as err:
                 print(err)
 
@@ -133,8 +141,6 @@ def main():
 
     for k,v in all_results.items():
         print(k, v)
-
-
 
 
 if __name__ == "__main__":
