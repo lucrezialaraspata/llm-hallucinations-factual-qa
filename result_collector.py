@@ -46,7 +46,7 @@ ig_steps = 64
 internal_batch_size = 4
 
 # Model
-model_name = "Meta-Llama-3-8B" #"opt-30b"
+model_name = "falcon-7b" #"opt-30b"
 layer_number = -1
 # hardcode below,for now. Could dig into all models but they take a while to load
 model_num_layers = {

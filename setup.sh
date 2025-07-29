@@ -1,8 +1,6 @@
-conda create -y -n hallucination python=3.10 numpy scipy ipykernel pandas scikit-learn
-conda activate hallucination
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install git+https://github.com/huggingface/transformers.git
-pip install matplotlib seaborn accelerate sentencepiece evaluate einops rouge-score gputil bitsandbytes
-pip install spacy
-python -m spacy download en_core_web_sm
-export LD_LIBRARY_PATH=/home/ec2-user/anaconda3/envs/hallucination/lib:$LD_LIBRARY_PATH
+uv venv --python 3.11.5
+source .venv/bin/activate
+uv pip install numpy scipy ipykernel pandas scikit-learn
+uv pip install torch
+uv pip install git+https://github.com/huggingface/transformers.git
+uv pip install matplotlib seaborn accelerate sentencepiece evaluate einops rouge-score gputil bitsandbytes
