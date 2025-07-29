@@ -314,5 +314,5 @@ def main(predict_logits=True, predict_fully_connected=True, predict_attention=Tr
 
 
 if __name__ == "__main__":
-    #main(predict_attention=False, predict_fully_connected=True, predict_logits=True)
+    main(predict_attention=False, predict_fully_connected=True, predict_logits=True)
     main(predict_attention=True, predict_fully_connected=False, predict_logits=False)

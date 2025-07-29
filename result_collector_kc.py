@@ -550,8 +550,8 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
 
 
 if __name__ == '__main__':
-    #compute_and_save_results(none_conflict=False, only_fully=True)
-    #compute_and_save_results(none_conflict=True, only_fully=True)
+    compute_and_save_results(none_conflict=False, only_fully=True)
+    compute_and_save_results(none_conflict=True, only_fully=True)
 
     compute_and_save_results(none_conflict=False, only_fully=False)
     compute_and_save_results(none_conflict=True, only_fully=False)
