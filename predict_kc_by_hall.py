@@ -81,152 +81,217 @@ def load_probing_model(model_name, model):
 
 
 def predict(predict_logits, predict_fully_connected, predict_attention, artifact_dict):
-    classifier_results = {}
-    correct = np.array(artifact_dict['none_conflict']).astype(int)
+    correct = torch.tensor(artifact_dict['none_conflict']).long().to(device)
+
+    print(artifact_dict.keys())
+
+    if predict_logits:
+        logits_correct = correct[:len(artifact_dict['logits'])]
+    else:
+        logits_correct = []
     
-    try:
-        with torch.no_grad():
-            # print("Processing token attributions...")
-            # token_model = RNNHallucinationClassifier()
-            # preds = torch.stack([token_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in artifact_dict['attributes_first']])
-            # preds = torch.nn.functional.softmax(preds, dim=1)
-            # prediction_classes = (preds[:,1]>0.5).type(torch.long).cpu()
-            # classifier_results['attribution_rnn_roc'] = roc_auc_score(correct, preds[:,1].detach().cpu().numpy())
-            # classifier_results['attribution_rnn_acc'] = (prediction_classes.numpy()==correct).mean()
-            
-            # logits
-            if predict_logits:
-                print("Processing logits...")
-                logits_correct = correct[:len(artifact_dict['logits'])]
-                first_logits = np.stack([sp.special.softmax(i[j]) for i,j in zip(artifact_dict['logits'], artifact_dict['start_pos'])])
+    if predict_fully_connected:
+        mlp_correct = correct[:len(artifact_dict['first_fully_connected'])]
+    else:
+        mlp_correct = []
 
-                logits_model = FFHallucinationClassifier(first_logits.shape[1])
-                logits_model = load_probing_model(FFN_MODEL_LOGITS_NAME, logits_model).to(device)
+    if predict_attention:
+        attn_correct = correct[:len(artifact_dict['first_attention'])]
+    else:
+        attn_correct = []
 
-                pred = torch.nn.functional.softmax(logits_model(first_logits), dim=1)
-                prediction_classes = (pred[:,1]>0.5).type(torch.long).cpu()
-                first_logits_roc, first_logits_acc = roc_auc_score(logits_correct.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==logits_correct.cpu().numpy()).mean()
+    logits_preds = []
+    mlp_preds = {}
+    attn_preds = {}
 
-                classifier_results['first_logits_roc'] = first_logits_roc
-                classifier_results['first_logits_acc'] = first_logits_acc
+    with torch.no_grad():
+        # --- Logits ---
+        if predict_logits:
+            print("Processing logits...")                
+            first_logits = np.stack([
+                sp.special.softmax(i[j].to(torch.float32).cpu().numpy()) 
+                for i, j in zip(artifact_dict['logits'], artifact_dict['start_pos'])
+            ])
 
-            # fully connected (mlp)
-            if predict_fully_connected:
-                print("Processing fully connected layers...")
-                for layer in range(artifact_dict['first_fully_connected'][0].shape[0]):
-                    mlp_correct = correct[:len(artifact_dict['first_fully_connected'])]
-                    inputs = np.stack([i[layer] for i in artifact_dict['first_fully_connected']])
-                    
-                    mlp_layer_model = FFHallucinationClassifier(inputs.shape[1])
-                    mlp_layer_model = load_probing_model(FFN_MODEL_LAYER_NAME.format(activation="fully", layer=layer), mlp_layer_model).to(device)
+            first_logits = torch.tensor(first_logits).float().to(device)
 
-                    pred = torch.nn.functional.softmax(mlp_layer_model(inputs), dim=1)
-                    prediction_classes = (pred[:,1]>0.5).type(torch.long).cpu()
-                    layer_roc, layer_acc = roc_auc_score(mlp_correct.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==mlp_correct.cpu().numpy()).mean()
+            logits_model = FFHallucinationClassifier(first_logits.shape[1])
+            logits_model = load_probing_model(FFN_MODEL_LOGITS_NAME, logits_model).to(device)
 
-                    classifier_results[f'first_fully_connected_roc_{layer}'] = layer_roc
-                    classifier_results[f'first_fully_connected_acc_{layer}'] = layer_acc
+            pred = torch.nn.functional.softmax(logits_model(first_logits), dim=1)
+            logits_preds = (pred[:, 1] > 0.5).long().cpu()
 
-            # attention
-            if predict_attention:
-                print("Processing attention layers...")
-                for layer in range(artifact_dict['first_attention'][0].shape[0]):
-                    inputs = np.stack([i[layer] for i in artifact_dict['first_attention']])
-                    pred = torch.nn.functional.softmax(attn_layer_model(inputs), dim=1)
+        # --- Fully Connected (MLP) ---
+        if predict_fully_connected:
+            print("Processing fully connected layers...")
+            for layer in range(artifact_dict['first_fully_connected'][0].shape[0]):
+                
+                inputs = np.stack([i[layer] for i in artifact_dict['first_fully_connected']])
+                inputs = torch.tensor(inputs).float().to(device)
 
-                    attn_layer_model = FFHallucinationClassifier(inputs.shape[1])
-                    attn_layer_model = load_probing_model(FFN_MODEL_LAYER_NAME.format(activation="attn", layer=layer), attn_layer_model).to(device)
+                mlp_layer_model = FFHallucinationClassifier(inputs.shape[1])
+                mlp_layer_model = load_probing_model(
+                    FFN_MODEL_LAYER_NAME.format(activation="fully", layer=layer),
+                    mlp_layer_model
+                ).to(device)
 
-                    attn_correct = correct[:len(artifact_dict['first_attention'])]
-                    prediction_classes = (pred[:,1]>0.5).type(torch.long).cpu()
-                    layer_roc, layer_acc = roc_auc_score(attn_correct.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==attn_correct.cpu().numpy()).mean()
+                pred = torch.nn.functional.softmax(mlp_layer_model(inputs), dim=1)
+                mlp_preds[layer] = (pred[:, 1] > 0.5).long().cpu()
 
-                    classifier_results[f'first_attention_roc_{layer}'] = layer_roc
-                    classifier_results[f'first_attention_acc_{layer}'] = layer_acc            
-    except Exception as err:
-        print(f"[PREDICT] Error occurred: {err}")
+        # --- Attention Layers ---
+        if predict_attention:
+            print("Processing attention layers...")
+            for layer in range(artifact_dict['first_attention'][0].shape[0]):
+                attn_correct = correct[:len(artifact_dict['first_attention'])]
+                inputs = np.stack([i[layer] for i in artifact_dict['first_attention']])
+                inputs = torch.tensor(inputs).float().to(device)
 
-    return classifier_results
+                attn_layer_model = FFHallucinationClassifier(inputs.shape[1])
+                attn_layer_model = load_probing_model(
+                    FFN_MODEL_LAYER_NAME.format(activation="attn", layer=layer),
+                    attn_layer_model
+                ).to(device)
 
+                pred = torch.nn.functional.softmax(attn_layer_model(inputs), dim=1)
+                attn_preds[layer] = (pred[:, 1] > 0.5).long().cpu()
+
+    return logits_correct, logits_preds, mlp_correct, mlp_preds, attn_correct, attn_preds
+
+
+def to_numpy_array(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    elif isinstance(x, list):
+        return np.array([to_numpy_array(i) for i in x])
+    else:
+        return np.array(x)
 
 
 def main(predict_logits=True, predict_fully_connected=True, predict_attention=True):
     print("---------- Classifier Model Prediction ---------")
     print(f"Predicting logits: {predict_logits}, fully connected layers: {predict_fully_connected}, attention layers: {predict_attention}")
 
-
     all_results = {}
+    all_logits_correct, all_logits_preds, all_mlp_correct, all_mlp_preds, all_attn_correct, all_attn_preds = [], [], [], {}, [], {}
 
     # Load and merge all pickle files into a single 'results' dict    
     artifacts_dir = "./results/kc"
     labels_dirs = os.listdir(artifacts_dir)
     print(f"Found {len(labels_dirs)} activation directories: {labels_dirs}")
 
-    try:
-        for label_dir in labels_dirs:
-            print(f"\nProcessing label directory: {label_dir}")
-            activations = os.listdir(os.path.join(artifacts_dir, label_dir))
 
-            for activation_dir in activations:
-                if not predict_fully_connected and "fully" in activation_dir:
-                    print(f"Skipping fully connected activation directory: {activation_dir}")
-                    continue
-                if not predict_attention and "attn" in activation_dir:
-                    print(f"Skipping attention activation directory: {activation_dir}")
-                    continue
+    for label_dir in labels_dirs:
+        print(f"\nProcessing label directory: {label_dir}")
+        activations = os.listdir(os.path.join(artifacts_dir, label_dir))
 
-                print(f"\t - Activation directory: {activation_dir}")
-                
-                pickle_dir = os.path.join(artifacts_dir, label_dir, activation_dir)
-                inference_results = list(Path(pickle_dir).glob("*.pickle"))
+        for activation_dir in activations:
+            if not predict_fully_connected and "mlp" in activation_dir:
+                print(f"Skipping fully connected activation directory: {activation_dir}")
+                continue
+            if not predict_attention and "attn" in activation_dir:
+                print(f"Skipping attention activation directory: {activation_dir}")
+                continue
 
-                print(f"\t\t -> Found {len(inference_results)} pickle files in {pickle_dir}")
+            print(f"\t - Activation directory: {activation_dir}")
+            
+            pickle_dir = os.path.join(artifacts_dir, label_dir, activation_dir)
+            inference_results = list(Path(pickle_dir).glob("*.pickle"))
 
-                artifact_dict = {}
-                for results_file in tqdm(inference_results, desc="Loading pickle files"):
-                    try:
-                        with open(results_file, "rb") as infile:
-                            batch_results = pickle.load(infile)
+            print(f"\t\t -> Found {len(inference_results)} pickle files in {pickle_dir}")
 
-                        for k, v in batch_results.items():
-                            if k not in artifact_dict:
-                                artifact_dict[k] = v
+            artifact_dict = {}
+            for results_file in tqdm(inference_results, desc="Loading pickle files"):
+                try:
+                    with open(results_file, "rb") as infile:
+                        batch_results = pickle.load(infile)
+
+                    for k, v in batch_results.items():
+                        if k not in artifact_dict:
+                            artifact_dict[k] = v
+                        else:
+                            # Extend lists, concatenate arrays, or handle as needed
+                            if isinstance(artifact_dict[k], np.ndarray):
+                                artifact_dict[k] = np.concatenate([artifact_dict[k], v], axis=0)
+                            elif isinstance(artifact_dict[k], list):
+                                artifact_dict[k].extend(v)
                             else:
-                                # Extend lists, concatenate arrays, or handle as needed
-                                if isinstance(artifact_dict[k], np.ndarray):
-                                    artifact_dict[k] = np.concatenate([artifact_dict[k], v], axis=0)
-                                elif isinstance(artifact_dict[k], list):
-                                    artifact_dict[k].extend(v)
-                                else:
-                                    # For other types, you may need to handle accordingly
-                                    pass
-                    except EOFError:
-                        print(f"Error: Ran out of input while reading {results_file}. Skipping this file.")
-                        continue
-                    except Exception as e:
-                        print(f"Error processing file {results_file}: {e}")
-                        continue
-                    
-                    gc.collect()  # Clear memory after processing each file
-    
-                # Predict
-                acc = predict(predict_logits, predict_fully_connected, predict_attention, artifact_dict)
-                for k, v in acc.items():
-                    if k in all_results:
-                        # Average old and new value
-                        all_results[k] = (all_results[k] + v) / 2
-                        print(f"Updated {k} with new value: {v}, old value: {all_results[k]}")
-                    else:
-                        # First time this label is seen
-                        all_results[k] = v
-
+                                # For other types, you may need to handle accordingly
+                                pass
+                except EOFError:
+                    print(f"Error: Ran out of input while reading {results_file}. Skipping this file.")
+                    continue
+                except Exception as e:
+                    print(f"Error processing file {e}")
+                    continue
+                
                 gc.collect()  # Clear memory after processing each file
 
-                print(f" ---- Check:{artifact_dict.keys()} ----")
-    except Exception as e:
-        print(f"Error processing files: {e}")
-        return
+            # Predict
+            logits_correct, logits_preds, mlp_correct, mlp_preds, attn_correct, attn_preds = predict(predict_logits, predict_fully_connected, predict_attention, artifact_dict)
+            
+            all_logits_correct.extend(logits_correct)
+            all_logits_preds.extend(logits_preds)
 
+            all_mlp_correct.extend(mlp_correct)
+            for layer, preds in mlp_preds.items():
+                if layer not in all_mlp_preds:
+                    all_mlp_preds[layer] = preds
+                else:
+                    all_mlp_preds[layer] = np.concatenate([all_mlp_preds[layer], preds], axis=0)
+
+            all_attn_correct.extend(attn_correct)
+            for layer, preds in attn_preds.items():
+                if layer not in all_attn_preds:
+                    all_attn_preds[layer] = preds
+                else:
+                    all_attn_preds[layer] = np.concatenate([all_attn_preds[layer], preds], axis=0)
+
+            gc.collect()  # Clear memory after processing each file
+
+            print(f" ---- Check:{artifact_dict.keys()} ----")
+    
+    print("---------- Compute Metrics ---------")
+
+    # -- Logits Metrics ---
+    if predict_logits:
+        print("Processing logits metrics...")
+        all_logits_correct = to_numpy_array(all_logits_correct)
+        all_logits_preds = to_numpy_array(all_logits_preds)
+
+        first_logits_roc = roc_auc_score(all_logits_correct, all_logits_preds)
+        print("all_logits_preds shape:", all_logits_preds.shape)
+        first_logits_acc = (all_logits_preds == all_logits_correct).mean()
+
+        all_results['first_logits_roc'] = first_logits_roc
+        all_results['first_logits_acc'] = first_logits_acc
+
+    # -- Fully Connected Metrics ---
+    if predict_fully_connected:
+        print("Processing fully connected layers...")
+        all_mlp_correct = to_numpy_array(all_mlp_correct)
+        for layer, preds in all_mlp_preds.items():
+            preds = to_numpy_array(preds)
+
+            layer_roc = roc_auc_score(all_mlp_correct, preds)
+            layer_acc = (preds == all_mlp_correct).mean()
+
+            all_results[f'first_fully_connected_roc_{layer}'] = layer_roc
+            all_results[f'first_fully_connected_acc_{layer}'] = layer_acc
+
+    # -- Attention Metrics ---
+    if predict_attention:
+        print("Processing attention layers...")
+        all_attn_correct = to_numpy_array(all_attn_correct)
+        for layer, preds in all_attn_preds.items():
+            preds = to_numpy_array(preds)
+
+            layer_roc = roc_auc_score(all_attn_correct, preds)
+            layer_acc = (preds == all_attn_correct).mean()
+
+            all_results[f'first_attention_roc_{layer}'] = layer_roc
+            all_results[f'first_attention_acc_{layer}'] = layer_acc
+
+    print("---------- Results Summary ---------")
     print("All results collected:")
     print(all_results.keys())
 
@@ -244,13 +309,10 @@ def main(predict_logits=True, predict_fully_connected=True, predict_attention=Tr
     metrics_filename += "kc_metrics.json"
     print(f"Saving metrics to {metrics_filename}")
 
-    if not os.path.exists(os.path.dirname(metrics_filename)):
-        os.makedirs(os.path.dirname(metrics_filename))
-
     with open(metrics_filename, "w") as f:
         json.dump(all_results, f)
-        
+
 
 if __name__ == "__main__":
-    main(predict_attention=False, predict_fully_connected=True, predict_logits=True)
+    #main(predict_attention=False, predict_fully_connected=True, predict_logits=True)
     main(predict_attention=True, predict_fully_connected=False, predict_logits=False)

@@ -2,3 +2,15 @@
 .idea/
 *.csv
 models/
+falcon-7b/
+__pycache__/
+*.pyc
+*.pkl
+*.pt
+.cache/
+.venv/
+results/
+trivia_qa/
+*.log
+*.zip
+error.log

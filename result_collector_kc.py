@@ -1,3 +1,4 @@
+import gc
 import functools
 from datetime import datetime
 from typing import Any, Dict
@@ -40,7 +41,7 @@ trex_data_to_question_template = {
 # IO
 data_dir = Path(".") # Where our data files are stored
 model_dir = Path("./.cache/models/") # Cache for huggingface models
-results_dir = Path("./results/kc") # Directory for storing results
+
 
 # Hardware
 gpu = "0"
@@ -81,12 +82,14 @@ fully_connected_forward_handles = {}
 
 @torch.no_grad()
 def save_fully_connected_hidden(layer_name, mod, inp, out):
-    fully_connected_hidden_layers[layer_name].append(out.squeeze().detach().to(torch.float32).cpu().numpy())
+    # Convert to float16 instead of float32 to save memory
+    fully_connected_hidden_layers[layer_name].append(out.squeeze().detach().to(torch.float16).cpu().numpy())
 
 
 @torch.no_grad()
 def save_attention_hidden(layer_name, mod, inp, out):
-    attention_hidden_layers[layer_name].append(out.squeeze().detach().to(torch.float32).cpu().numpy())
+    # Convert to float16 instead of float32 to save memory
+    attention_hidden_layers[layer_name].append(out.squeeze().detach().to(torch.float16).cpu().numpy())
 
 
 def get_stop_token():
@@ -181,10 +184,20 @@ def answer_trivia(input_ids, model):
         input_ids = input_ids[:, -max_length:]
         print(f"Input IDs shape after truncation: {input_ids.shape} - {input_ids.shape[-1]}")
     
+    # Monitor GPU memory before inference
+    if torch.cuda.is_available():
+        memory_before = torch.cuda.memory_allocated() / 1024**3  # GB
+        print(f"GPU memory before inference: {memory_before:.2f} GB")
+    
     logits, start_pos = answer_question(input_ids, model)
-    # Clear cache after inference to free memory
+    
+    # Clear cache after inference and monitor memory
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        memory_after = torch.cuda.memory_allocated() / 1024**3  # GB
+        print(f"GPU memory after inference: {memory_after:.2f} GB")
+    
     return logits, start_pos
 
 
@@ -269,15 +282,47 @@ def get_ig(input_ids, forward_func, embedder, model):
     #).detach().cpu().numpy()
     #return attributes
 
+def get_existing_batches(results_dir):
+    """Check which batches have already been processed and saved."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+    existing_batches = set()
+    
+    # Pattern to match batch files
+    pattern = f"{model_name}_{dataset_name}_batch*_start-{start}_end-{end}_*.pickle"
+    
+    for file_path in results_dir.glob(pattern):
+        # Extract batch number from filename
+        filename = file_path.name
+        if "batch" in filename:
+            try:
+                batch_part = filename.split("_batch")[1].split("_")[0]
+                batch_num = int(batch_part)
+                existing_batches.add(batch_num)
+            except (IndexError, ValueError):
+                continue
+    
+    return sorted(existing_batches)
+
 @torch.no_grad()
 def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, only_fully=True):
-    
+    results_dir = Path("./results/kc") # Directory for storing results
+
     print("=="*50)
     print(f"Computing results for {model_name} on {dataset_name} dataset \nNone conflict: {none_conflict}, Use local: {use_local}")
     print(f"\n Only fully connected: {only_fully}, Not IG: {not_ig}")
     print("=="*50)
     
     batch_size = 1
+    if none_conflict:
+        results_dir = results_dir / "none_conflict"
+    else:
+        results_dir = results_dir / "conflict"
+
+    if only_fully:
+        results_dir = results_dir / "mlp"
+    else:
+        results_dir = results_dir / "attn"
+
 
     # Model
     print(f"Loading model {model_name} from {model_repos[model_name][0]}/{model_name}")
@@ -285,8 +330,8 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
     token_loader = LlamaTokenizer if "llama" in model_name else AutoTokenizer
     device_string = PartialState().process_index
     n_gpus = torch.cuda.device_count()
-    # Further increase memory limit for longer sequences
-    max_memory = {i: "12000MB" for i in range(n_gpus)}
+    # Further reduce memory limit for each GPU
+    max_memory = {i: "8000MB" for i in range(n_gpus)}  # Reduced from 12GB to 8GB
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -346,16 +391,42 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
     # Memory management settings
     save_interval = 20  # Save every 20 examples
     batch_counter = 0
+    
+    # Calculate starting point based on existing batches
+    existing_batches = get_existing_batches(results_dir)
+    if existing_batches:
+        batch_counter = max(existing_batches)
+        skip_examples = batch_counter * save_interval
+        print(f"Resuming from batch {batch_counter + 1}, skipping first {skip_examples} examples")
+    else:
+        skip_examples = 0
 
     for bid, batch in tqdm_bar:
         tqdm_bar.set_description(f"analysis {bid}, num_examples: {num_examples}")
         num_examples += 1
+        
+        # Skip already processed examples
+        if num_examples <= skip_examples:
+            continue
 
-        # Clear previous activations and GPU cache
-        fully_connected_hidden_layers.clear()
-        attention_hidden_layers.clear()
+        # More aggressive memory cleanup before processing each example
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # Clear previous activations and force garbage collection
+        fully_connected_hidden_layers.clear()
+        attention_hidden_layers.clear()
+        gc.collect()
+        
+        # Force memory cleanup every 5 examples
+        if (num_examples - skip_examples) % 5 == 0:
+            print(f"Performing deep memory cleanup at example {num_examples}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+            gc.collect()
         
         logits, start_pos = question_asker(batch[input_ids_key], model)
         layer_start, layer_end = get_start_end_layer(model)
@@ -401,43 +472,77 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
                 raise TypeError(f"Unsupported type for attributes_first: {type(attributes_first)}")
 
         # Check if we need to save results and clear memory
-        if num_examples % save_interval == 0:
+        # Only count examples that are actually processed (after skip_examples)
+        processed_examples = num_examples - skip_examples
+        if processed_examples % save_interval == 0:
             batch_counter += 1
+            
+            # Check if this batch already exists
+            batch_filename = f"{model_name}_{dataset_name}_batch{batch_counter}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle"
+            batch_path = results_dir / batch_filename
+            
+            if batch_path.exists():
+                print(f"\nBatch {batch_counter} already exists, skipping save...")
+                # Clear results anyway to free memory
+                results.clear()
+                results = defaultdict(list)
+                continue
+            
             print(f"\nSaving intermediate results for batch {batch_counter} (examples {num_examples-save_interval+1}-{num_examples})...")
             
-            # Save intermediate results
-            results_dir.mkdir(parents=True, exist_ok=True)
-            intermediate_filename = f"{model_name}_{dataset_name}_batch{batch_counter}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle"
+            gc.collect()
             
-            with open(results_dir / intermediate_filename, "wb") as outfile:
+            with open(batch_path, "wb") as outfile:
                 outfile.write(pickle.dumps(results))
             
-            print(f"Intermediate results saved to {intermediate_filename}")
+            print(f"Intermediate results saved to {batch_filename}")
             
             # Clear results to free memory
             results.clear()
             results = defaultdict(list)
             
             # Force garbage collection and clear GPU cache
-            import gc
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
             print("Memory cleared for next batch\n")
 
+    # CRITICAL: Remove all hooks to prevent memory leaks
+    print("Removing forward hooks...")
+    for handle in fully_connected_forward_handles.values():
+        handle.remove()
+    for handle in attention_forward_handles.values():
+        handle.remove()
+    
+    # Final memory cleanup
+    fully_connected_hidden_layers.clear()
+    attention_hidden_layers.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
     # Save any remaining results that weren't saved in the periodic saves
     if len(results['logits']) > 0:
         batch_counter += 1
-        print(f"Saving final batch {batch_counter} with remaining {len(results['logits'])} examples...")
-        results_dir.mkdir(parents=True, exist_ok=True)
         
+        # Check if this final batch already exists
         final_filename = f"{model_name}_{dataset_name}_batch{batch_counter}_start-{start}_end-{end}_{datetime.now().month}_{datetime.now().day}.pickle"
-        with open(results_dir / final_filename, "wb") as outfile:
-            outfile.write(pickle.dumps(results))
-        print(f"Final results saved to {final_filename}")
+        final_path = results_dir / final_filename
+        
+        if not final_path.exists():
+            print(f"Saving final batch {batch_counter} with remaining {len(results['logits'])} examples...")
+            
+            with open(final_path, "wb") as outfile:
+                outfile.write(pickle.dumps(results))
+            print(f"Final results saved to {final_filename}")
+        else:
+            print(f"Final batch {batch_counter} already exists, skipping save...")
     
-    print(f"Finished processing {num_examples} examples across {batch_counter} batches.")
+    total_processed = num_examples - skip_examples
+    print(f"Finished processing {total_processed} new examples across {batch_counter - (max(existing_batches) if existing_batches else 0)} new batches.")
+    print(f"Total examples in dataset: {num_examples}, Total batches: {batch_counter}")
 
     batch[input_ids_key] = []
     
@@ -445,6 +550,8 @@ def compute_and_save_results(none_conflict=False, use_local=True, not_ig=True, o
 
 
 if __name__ == '__main__':
-    compute_and_save_results(none_conflict=False, only_fully=True)
+    #compute_and_save_results(none_conflict=False, only_fully=True)
+    #compute_and_save_results(none_conflict=True, only_fully=True)
 
-    compute_and_save_results(none_conflict=True, only_fully=True)
+    compute_and_save_results(none_conflict=False, only_fully=False)
+    compute_and_save_results(none_conflict=True, only_fully=False)

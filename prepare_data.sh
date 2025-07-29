@@ -15,6 +15,5 @@
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=l.laraspata3@phd.uniba.it
 
-conda activate hallucination
-
+source .venv/bin/activate
 srun -u python -W ignore -m result_collector

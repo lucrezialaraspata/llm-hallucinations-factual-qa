@@ -28,6 +28,7 @@ class NQSwap(Dataset):
         self.k_shot = k_shot
         self.seed = seed
         self.tokenizer = tokenizer
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.demonstrations_org_context = demonstrations_org_context
         self.demonstrations_org_answer = demonstrations_org_answer
@@ -113,8 +114,8 @@ class NQSwap(Dataset):
                 org_answers.append(item["org_answer"])
                 questions.append(item["question"])
 
-            w_inputs = self.tokenizer(with_ctx_inputs_str, return_tensors="pt", padding=True)
-            wo_inputs = self.tokenizer(without_ctx_inputs_str, return_tensors="pt", padding=True)
+            w_inputs = self.tokenizer(with_ctx_inputs_str, return_tensors="pt", padding=True, max_length=2048, truncation=True)
+            wo_inputs = self.tokenizer(without_ctx_inputs_str, return_tensors="pt", padding=True, max_length=2048, truncation=True)
 
             return {"with_ctx_input_ids": w_inputs["input_ids"],
                     "with_ctx_attention_mask": w_inputs["attention_mask"],

@@ -58,7 +58,6 @@ murmurhash==1.0.13
 nest-asyncio==1.6.0
 networkx==3.5
 nltk==3.9.1
-numpy==2.3.2
 nvidia-cublas-cu12==12.4.5.8
 nvidia-cuda-cupti-cu12==12.4.127
 nvidia-cuda-nvrtc-cu12==12.4.127

@@ -46,14 +46,14 @@ ig_steps = 64
 internal_batch_size = 4
 
 # Model
-model_name = "falcon-7b" #"opt-30b"
+model_name = "Meta-Llama-3-8B" #"opt-30b"
 layer_number = -1
 # hardcode below,for now. Could dig into all models but they take a while to load
 model_num_layers = {
     "falcon-40b" : 60,
     "falcon-7b" : 32,
     "open_llama_13b" : 40,
-    "open_llama_7b" : 32,
+    "Meta-Llama-3-8B" : 32,
     "opt-6.7b" : 32,
     "opt-30b" : 48,
 }
@@ -63,7 +63,7 @@ model_repos = {
     "falcon-40b" : ("tiiuae", f".*transformer.h.{coll_str}.mlp.dense_4h_to_h", f".*transformer.h.{coll_str}.self_attention.dense"),
     "falcon-7b" : ("tiiuae", f".*transformer.h.{coll_str}.mlp.dense_4h_to_h", f".*transformer.h.{coll_str}.self_attention.dense"),
     "open_llama_13b" : ("openlm-research", f".*model.layers.{coll_str}.mlp.up_proj", f".*model.layers.{coll_str}.self_attn.o_proj"),
-    "open_llama_7b" : ("openlm-research", f".*model.layers.{coll_str}.mlp.up_proj", f".*model.layers.{coll_str}.self_attn.o_proj"),
+    "Meta-Llama-3-8B" : ("meta-llama", f".*model.layers.{coll_str}.mlp.up_proj", f".*model.layers.{coll_str}.self_attn.o_proj"),
     "opt-6.7b" : ("facebook", f".*model.decoder.layers.{coll_str}.fc2", f".*model.decoder.layers.{coll_str}.self_attn.out_proj"),
     "opt-30b" : ("facebook", f".*model.decoder.layers.{coll_str}.fc2", f".*model.decoder.layers.{coll_str}.self_attn.out_proj", ),
 }
@@ -308,7 +308,7 @@ def compute_and_save_results():
 
     # Generate results
     results = defaultdict(list)
-    for idx in tqdm(range(len(dataset))):
+    for idx in tqdm(range(0, 7000)):
         fully_connected_hidden_layers.clear()
         attention_hidden_layers.clear()
 
