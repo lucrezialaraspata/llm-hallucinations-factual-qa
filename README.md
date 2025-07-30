@@ -3,8 +3,13 @@
 This repository investigates how hallucinations relate to underlying knowledge conflicts. It provides tools and scripts to collect, analyze, and probe model outputs for factual inconsistencies, supporting research into model reliability and interpretability.
 
 ## ⚙️ Setup
-
-Set up the conda env by running `setup.sh`, which will create a virtual environment using uv. To activate such venv, you can run the command `source .venv/bin/activate` in Linux environments.
+Create and activate the uv virtual environment by running:
+```bash
+uv venv --python 3.11.5
+source .venv/bin/activate
+```
+Set up the env by running `setup.sh`, which will install all the needed dependencies. 
+To activate such venv, you can run the command `source .venv/bin/activate` in Linux environments.
 
 ## 📊 Data sources
 
