@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH -A IscrC_ARTURO
+#SBATCH -A [removed for anonymization]
 #SBATCH -p boost_usr_prod
 #SBATCH --qos boost_qos_dbg
 #SBATCH --time=00:30:00
@@ -13,7 +13,7 @@
 #SBATCH --out=output.log
 #SBATCH --err=error.log
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=l.laraspata3@phd.uniba.it
+#SBATCH --mail-user=mail@domain.com
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_VISIBLE_DEVICES=0,1,2,3
