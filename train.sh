@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH -A [removed for anonymization]
+#SBATCH -A IscrC_EXAM
 #SBATCH -p boost_usr_prod
 #SBATCH --qos boost_qos_dbg
 #SBATCH --time=00:30:00
@@ -13,7 +13,7 @@
 #SBATCH --out=output.log
 #SBATCH --err=error.log
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=mail@domain.com
+#SBATCH --mail-user=l.laraspata3@phd.uniba.it
 
 conda activate hallucination
 
